@@ -6,9 +6,9 @@ use std::thread;
 use bytesize::ByteSize;
 use walkdir::WalkDir;
 
-type CacheEntry = (String, f32, u64);
+type CacheEntry = (String, u64);
 type Cache = HashMap<String, u64>;
-type Intermediate = BTreeMap<String, (f32, u64)>;
+type Intermediate = BTreeMap<u64, String>;
 
 //#[derive(PartialEq)]
 enum ScanState {
@@ -102,23 +102,28 @@ impl eframe::App for TemplateApp {
                     if let Ok(scan_result) = rx.try_recv() {
                         match scan_result {
                             Message::Done => {
-                                let res = results
-                                    .iter()
-                                    .map(|(p, (f, s))| (p.to_owned(), *f, *s))
-                                    .collect();
+                                let res = results.iter().map(|(s, p)| (p.to_owned(), *s)).collect();
                                 *state = ScanState::Done(res);
+                                return;
                             }
-                            Message::Intermediate((p, f, s)) => {
-                                results.insert(p, (f, s));
+                            Message::Intermediate((p, s)) => {
+                                results.insert(s, p);
                             }
                         }
-                    } else {
-                        ui.label("Scanning in progress...");
-                        display_dirs(ui, results.iter().map(|(p, (f, s))| (p.to_owned(), *f, *s)));
                     }
+
+                    ui.label("Scanning in progress...");
+                    let total = results.iter().map(|(s, _)| s).sum();
+                    display_dirs(
+                        ui,
+                        results.iter().rev().map(|(s, p)| (p.to_owned(), *s)),
+                        total,
+                    );
                 }
                 ScanState::Done(dirs) => {
-                    display_dirs(ui, dirs.iter().cloned());
+                    ui.label("Done");
+                    let total = dirs.iter().map(|(_, s)| s).sum();
+                    display_dirs(ui, dirs.iter().rev().cloned(), total);
                     add_scan_button(ui, ctx, state, path, cache.clone());
                 }
                 ScanState::Error(e) => {
@@ -132,9 +137,9 @@ impl eframe::App for TemplateApp {
     }
 }
 
-fn display_dirs<I>(ui: &mut egui::Ui, iter: I)
+fn display_dirs<I>(ui: &mut egui::Ui, iter: I, total: u64)
 where
-    I: Iterator<Item = (String, f32, u64)>,
+    I: Iterator<Item = (String, u64)>,
 {
     egui::Grid::new("file_grid")
         .num_columns(3)
@@ -142,8 +147,13 @@ where
         .show(ui, |ui| {
             for dir in iter {
                 ui.label(&dir.0);
-                ui.add(egui::ProgressBar::new(dir.1).show_percentage());
-                ui.label(ByteSize(dir.2).to_string_as(true));
+                let fraction = dir.1 as f32 / total as f32;
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .desired_width(200.0),
+                );
+                ui.label(ByteSize(dir.1).to_string_as(true));
                 ui.end_row();
             }
         });
@@ -173,27 +183,19 @@ fn add_scan_button(
             let mut cache = cache.lock().unwrap();
             cache.insert("Test".to_string(), 2);
 
-            let mut total = 0;
-
             // Safe because it's checked for errror before
             for path in paths.unwrap() {
                 // TODO: Use cache
                 let path = path.unwrap();
 
                 let size = calc_dir_size(&path);
-                total += size;
-                let fraction = size as f32 / total as f32;
 
                 let dir = path.file_name().to_str().unwrap().to_owned();
-                tx.send(Message::Intermediate((dir, fraction, size)))
-                    .unwrap();
-                thread::sleep(std::time::Duration::from_millis(250));
+                tx.send(Message::Intermediate((dir, size))).unwrap();
                 ctx.request_repaint();
             }
 
-            thread::sleep(std::time::Duration::from_millis(1000));
             tx.send(Message::Done).unwrap();
-
             ctx.request_repaint();
         });
     }
