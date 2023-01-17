@@ -94,6 +94,10 @@ impl eframe::App for TemplateApp {
             ui.heading("Dir scan");
 
             ui.text_edit_singleline(path);
+            if ui.button("Stop").clicked() {
+                *state = ScanState::Idle;
+            }
+
             match state {
                 ScanState::Idle => {
                     add_scan_button(ui, ctx, state, path, cache.clone());
@@ -131,8 +135,6 @@ impl eframe::App for TemplateApp {
                     add_scan_button(ui, ctx, state, path, cache.clone());
                 }
             }
-
-            ui.label("<END>");
         });
     }
 }
@@ -156,6 +158,10 @@ where
                 ui.label(ByteSize(dir.1).to_string_as(true));
                 ui.end_row();
             }
+
+            let total = ByteSize(total).to_string_as(true);
+            ui.label(format!("Total: {total}"));
+            ui.end_row();
         });
 }
 
@@ -191,11 +197,16 @@ fn add_scan_button(
                 let size = calc_dir_size(&path);
 
                 let dir = path.file_name().to_str().unwrap().to_owned();
-                tx.send(Message::Intermediate((dir, size))).unwrap();
+
+                if tx.send(Message::Intermediate((dir, size))).is_err() {
+                    println!("Nowhere to send");
+                    return;
+                }
                 ctx.request_repaint();
             }
 
-            tx.send(Message::Done).unwrap();
+            // Don't care for this message to be received
+            let _ = tx.send(Message::Done);
             ctx.request_repaint();
         });
     }
