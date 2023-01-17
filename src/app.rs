@@ -1,12 +1,22 @@
-use std::sync::mpsc::Receiver;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{mpsc::Receiver, Arc, Mutex};
 use std::thread;
+
+type CacheEntry = (String, f32, u64);
+type Cache = HashMap<String, u64>;
+type Intermediate = BTreeMap<String, (f32, u64)>;
 
 //#[derive(PartialEq)]
 enum ScanState {
     Idle,
-    Scanning(Receiver<Option<Vec<(String, f32)>>>),
-    Done(Vec<(String, f32)>),
+    Scanning((Receiver<Message>, Intermediate)),
+    Done(Vec<CacheEntry>),
     Error(String),
+}
+
+enum Message {
+    Intermediate(CacheEntry),
+    Done,
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -17,9 +27,9 @@ pub struct TemplateApp {
     path: String,
     #[serde(skip)]
     state: ScanState,
-    // this how you opt-out of serialization of a member
+    // File size cache
     #[serde(skip)]
-    value: f32,
+    cache: Arc<Mutex<Cache>>,
 }
 
 impl Default for TemplateApp {
@@ -27,7 +37,7 @@ impl Default for TemplateApp {
         Self {
             path: "C:\\Projects\\rust".to_owned(),
             state: ScanState::Idle,
-            value: 2.7,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -57,11 +67,7 @@ impl eframe::App for TemplateApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let Self {
-            path,
-            state,
-            value: _,
-        } = self;
+        let Self { path, state, cache } = self;
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -86,48 +92,66 @@ impl eframe::App for TemplateApp {
             ui.text_edit_singleline(path);
             match state {
                 ScanState::Idle => {
-                    add_scan_button(ui, ctx, state, path);
+                    add_scan_button(ui, ctx, state, path, cache.clone());
                 }
-                ScanState::Scanning(rx) => {
+                ScanState::Scanning((rx, results)) => {
                     if let Ok(scan_result) = rx.try_recv() {
                         match scan_result {
-                            Some(dirs) => *state = ScanState::Done(dirs),
-                            None => *state = ScanState::Error(String::from("unknown")),
+                            Message::Done => {
+                                let res = results
+                                    .iter()
+                                    .map(|(p, (f, s))| (p.to_owned(), *f, *s))
+                                    .collect();
+                                *state = ScanState::Done(res);
+                            }
+                            Message::Intermediate((p, f, s)) => {
+                                results.insert(p, (f, s));
+                            }
                         }
                     } else {
                         ui.label("Scanning in progress...");
+                        display_dirs(ui, results.iter().map(|(p, (f, s))| (p.to_owned(), *f, *s)));
                     }
                 }
                 ScanState::Done(dirs) => {
-                    for dir in dirs {
-                        ui.horizontal(|ui| {
-                            ui.label(&dir.0);
-                            ui.add(egui::ProgressBar::new(dir.1).show_percentage());
-                        });
-                    }
-                    add_scan_button(ui, ctx, state, path);
+                    display_dirs(ui, dirs.iter().cloned());
+                    add_scan_button(ui, ctx, state, path, cache.clone());
                 }
                 ScanState::Error(e) => {
                     ui.label(format!("Error: {e}"));
-                    add_scan_button(ui, ctx, state, path);
+                    add_scan_button(ui, ctx, state, path, cache.clone());
                 }
             }
 
             ui.label("<END>");
         });
-
-        if false {
-            egui::Window::new("Window").show(ctx, |ui| {
-                ui.label("Windows can be moved by dragging them.");
-                ui.label("They are automatically sized based on contents.");
-                ui.label("You can turn on resizing and scrolling if you like.");
-                ui.label("You would normally choose either panels OR windows.");
-            });
-        }
     }
 }
 
-fn add_scan_button(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut ScanState, path: &str) {
+fn display_dirs<I>(ui: &mut egui::Ui, iter: I)
+where
+    I: Iterator<Item = (String, f32, u64)>,
+{
+    egui::Grid::new("file_grid")
+        .num_columns(3)
+        .striped(true)
+        .show(ui, |ui| {
+            for dir in iter {
+                ui.label(&dir.0);
+                ui.add(egui::ProgressBar::new(dir.1).show_percentage());
+                ui.label(format!("{} bytes", &dir.2));
+                ui.end_row();
+            }
+        });
+}
+
+fn add_scan_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    state: &mut ScanState,
+    path: &str,
+    cache: Arc<Mutex<Cache>>,
+) {
     if ui.button("Calculate").clicked() {
         use std::sync::mpsc::channel;
 
@@ -138,18 +162,27 @@ fn add_scan_button(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut ScanState
         }
 
         let (tx, rx) = channel();
-        *state = ScanState::Scanning(rx);
+        *state = ScanState::Scanning((rx, BTreeMap::new()));
 
         let ctx = ctx.clone();
         thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_secs(1));
+            //thread::sleep(std::time::Duration::from_secs(1));
 
-            let res = paths
-                .unwrap()
-                .map(|p| (p.unwrap().file_name().to_str().unwrap().to_owned(), 0.5))
-                .collect();
+            let mut cache = cache.lock().unwrap();
+            cache.insert("Test".to_string(), 2);
 
-            tx.send(Some(res)).unwrap();
+            // Safe because it's checked for errror before
+            for path in paths.unwrap() {
+                // TODO: Use cache
+                let dir = path.unwrap().file_name().to_str().unwrap().to_owned();
+                tx.send(Message::Intermediate((dir, 0.5, 2))).unwrap();
+                thread::sleep(std::time::Duration::from_millis(250));
+                ctx.request_repaint();
+            }
+
+            thread::sleep(std::time::Duration::from_millis(1000));
+            tx.send(Message::Done).unwrap();
+
             ctx.request_repaint();
         });
     }
