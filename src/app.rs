@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs::DirEntry;
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 use std::thread;
+
+use bytesize::ByteSize;
+use walkdir::WalkDir;
 
 type CacheEntry = (String, f32, u64);
 type Cache = HashMap<String, u64>;
@@ -139,7 +143,7 @@ where
             for dir in iter {
                 ui.label(&dir.0);
                 ui.add(egui::ProgressBar::new(dir.1).show_percentage());
-                ui.label(format!("{} bytes", &dir.2));
+                ui.label(ByteSize(dir.2).to_string_as(true));
                 ui.end_row();
             }
         });
@@ -166,16 +170,23 @@ fn add_scan_button(
 
         let ctx = ctx.clone();
         thread::spawn(move || {
-            //thread::sleep(std::time::Duration::from_secs(1));
-
             let mut cache = cache.lock().unwrap();
             cache.insert("Test".to_string(), 2);
+
+            let mut total = 0;
 
             // Safe because it's checked for errror before
             for path in paths.unwrap() {
                 // TODO: Use cache
-                let dir = path.unwrap().file_name().to_str().unwrap().to_owned();
-                tx.send(Message::Intermediate((dir, 0.5, 2))).unwrap();
+                let path = path.unwrap();
+
+                let size = calc_dir_size(&path);
+                total += size;
+                let fraction = size as f32 / total as f32;
+
+                let dir = path.file_name().to_str().unwrap().to_owned();
+                tx.send(Message::Intermediate((dir, fraction, size)))
+                    .unwrap();
                 thread::sleep(std::time::Duration::from_millis(250));
                 ctx.request_repaint();
             }
@@ -186,4 +197,16 @@ fn add_scan_button(
             ctx.request_repaint();
         });
     }
+}
+
+fn calc_dir_size(path: &DirEntry) -> u64 {
+    let mut total = 0;
+    for e in WalkDir::new(path.path()).into_iter().filter_map(|e| e.ok()) {
+        let metadata = e.metadata().unwrap();
+        if metadata.is_file() {
+            total += metadata.len();
+        }
+    }
+
+    total
 }
