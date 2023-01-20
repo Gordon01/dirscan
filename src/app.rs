@@ -1,26 +1,33 @@
-use std::collections::{BTreeMap, HashMap};
-use std::fs::DirEntry;
+use std::collections::HashMap;
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 use std::thread;
 
 use bytesize::ByteSize;
 use walkdir::WalkDir;
 
-type CacheEntry = (String, u64);
+type FinalEntry = (String, u64);
 type Cache = HashMap<String, u64>;
-type Intermediate = BTreeMap<u64, String>;
 
-//#[derive(PartialEq)]
 enum ScanState {
     Idle,
-    Scanning((Receiver<Message>, Intermediate)),
-    Done(Vec<CacheEntry>),
+    Scanning((Receiver<Message>, Cache)),
+    Done(Vec<FinalEntry>),
     Error(String),
 }
 
 enum Message {
-    Intermediate(CacheEntry),
+    Intermediate(FinalEntry),
     Done,
+}
+
+impl ScanState {
+    fn is_scanning(&self) -> bool {
+        if let ScanState::Scanning(_) = self {
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -97,57 +104,64 @@ impl eframe::App for TemplateApp {
             if ui.button("Stop").clicked() {
                 *state = ScanState::Idle;
             }
+            if !state.is_scanning() {
+                add_scan_button(ui, ctx, state, path, cache.clone());
+            }
 
             match state {
-                ScanState::Idle => {
-                    add_scan_button(ui, ctx, state, path, cache.clone());
-                }
+                ScanState::Idle => {}
                 ScanState::Scanning((rx, results)) => {
                     if let Ok(scan_result) = rx.try_recv() {
                         match scan_result {
                             Message::Done => {
-                                let res = results.iter().map(|(s, p)| (p.to_owned(), *s)).collect();
-                                *state = ScanState::Done(res);
+                                let dirs = sort_results(results.iter());
+                                *state = ScanState::Done(dirs);
                                 return;
                             }
                             Message::Intermediate((p, s)) => {
-                                results.insert(s, p);
+                                results.entry(p).and_modify(|size| *size += s).or_insert(s);
                             }
                         }
                     }
 
                     ui.label("Scanning in progress...");
-                    let total = results.iter().map(|(s, _)| s).sum();
-                    display_dirs(
-                        ui,
-                        results.iter().rev().map(|(s, p)| (p.to_owned(), *s)),
-                        total,
-                    );
+
+                    // We're sorting and calculating sum every time
+                    // Probably needs optimisation
+                    let dirs = sort_results(results.iter());
+                    display_dirs(ui, &dirs);
                 }
                 ScanState::Done(dirs) => {
                     ui.label("Done");
-                    let total = dirs.iter().map(|(_, s)| s).sum();
-                    display_dirs(ui, dirs.iter().rev().cloned(), total);
-                    add_scan_button(ui, ctx, state, path, cache.clone());
+                    display_dirs(ui, dirs);
                 }
                 ScanState::Error(e) => {
                     ui.label(format!("Error: {e}"));
-                    add_scan_button(ui, ctx, state, path, cache.clone());
                 }
             }
         });
     }
 }
 
-fn display_dirs<I>(ui: &mut egui::Ui, iter: I, total: u64)
+fn sort_results<'a, I>(iter: I) -> Vec<FinalEntry>
 where
-    I: Iterator<Item = (String, u64)>,
+    I: Iterator<Item = (&'a String, &'a u64)>,
 {
+    let mut res: Vec<_> = iter.map(|(p, &s)| (p.to_owned(), s)).collect();
+    res.sort_by(|(_, a), (_, b)| b.cmp(a)); // Descending by size
+    res.truncate(10); // Keep only 10 top results
+
+    res
+}
+
+fn display_dirs(ui: &mut egui::Ui, vec: &Vec<FinalEntry>) {
+    let total = vec.iter().map(|(_, s)| s).sum();
+
     egui::Grid::new("file_grid")
         .num_columns(3)
         .striped(true)
         .show(ui, |ui| {
-            for dir in iter {
+            for dir in vec {
                 ui.label(&dir.0);
                 let fraction = dir.1 as f32 / total as f32;
                 ui.add(
@@ -173,36 +187,63 @@ fn add_scan_button(
     cache: Arc<Mutex<Cache>>,
 ) {
     if ui.button("Calculate").clicked() {
-        use std::sync::mpsc::channel;
-
-        let paths = std::fs::read_dir(path);
-        if let Err(e) = paths {
-            *state = ScanState::Error(e.to_string());
+        let sub_paths = if let Ok(p) = std::fs::read_dir(path) {
+            p
+        } else {
+            *state = ScanState::Error(format!("On open root dir: {path}"));
             return;
-        }
+        };
 
+        use std::sync::mpsc::channel;
         let (tx, rx) = channel();
-        *state = ScanState::Scanning((rx, BTreeMap::new()));
+        *state = ScanState::Scanning((rx, HashMap::new()));
 
         let ctx = ctx.clone();
         thread::spawn(move || {
             let mut cache = cache.lock().unwrap();
             cache.insert("Test".to_string(), 2);
 
-            // Safe because it's checked for errror before
-            for path in paths.unwrap() {
-                // TODO: Use cache
-                let path = path.unwrap();
+            let mut sub_iters: Vec<_> = sub_paths
+                .filter_map(|p| p.ok()) // Ignore subdirectory if it fails on read
+                .map(|p| {
+                    (
+                        WalkDir::new(p.path())
+                            .into_iter()
+                            .filter_map(|e| e.ok()) // Ignore any entry on a way
+                            .filter(|e| e.file_type().is_file()),
+                        p.file_name().to_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
 
-                let size = calc_dir_size(&path);
+            let mut flags = vec![true; sub_iters.len()];
 
-                let dir = path.file_name().to_str().unwrap().to_owned();
+            while !flags.iter().all(|&f| f == false) {
+                for (i, (iter, name)) in sub_iters.iter_mut().enumerate() {
+                    if flags[i] == false {
+                        continue;
+                    }
 
-                if tx.send(Message::Intermediate((dir, size))).is_err() {
-                    println!("Nowhere to send");
-                    return;
+                    //let (len, size) = iter.take(2).map(|e| e.metadata().unwrap().len()).enumerate().fold((0, 0),
+                    //    |(len, acc), (i, s)| (len.max(i), acc+s));
+                    let two: Vec<_> = iter.take(1024).collect();
+
+                    if !two.is_empty() {
+                        let size = two.iter().map(|e| e.metadata().unwrap().len()).sum::<u64>();
+                        // Fighting the borrow checker here
+                        if tx
+                            .send(Message::Intermediate((name.to_owned(), size)))
+                            .is_err()
+                        {
+                            println!("Nowhere to send");
+                            return;
+                        }
+                        ctx.request_repaint();
+                    } else {
+                        flags[i] = false;
+                        println!("Iter {i} done: {:?}", iter);
+                    }
                 }
-                ctx.request_repaint();
             }
 
             // Don't care for this message to be received
@@ -210,16 +251,4 @@ fn add_scan_button(
             ctx.request_repaint();
         });
     }
-}
-
-fn calc_dir_size(path: &DirEntry) -> u64 {
-    let mut total = 0;
-    for e in WalkDir::new(path.path()).into_iter().filter_map(|e| e.ok()) {
-        let metadata = e.metadata().unwrap();
-        if metadata.is_file() {
-            total += metadata.len();
-        }
-    }
-
-    total
 }
