@@ -100,13 +100,21 @@ impl eframe::App for TemplateApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Dir scan");
 
-            ui.text_edit_singleline(path);
-            if ui.button("Stop").clicked() {
-                *state = ScanState::Idle;
-            }
-            if !state.is_scanning() {
-                add_scan_button(ui, ctx, state, path, cache.clone());
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Home").clicked() {
+                    if let Some(p) = dirs_next::home_dir() {
+                        *path = p.to_str().unwrap().to_owned();
+                    }
+                }
+
+                ui.text_edit_singleline(path);
+                if ui.button("Stop").clicked() {
+                    *state = ScanState::Idle;
+                }
+                if !state.is_scanning() {
+                    add_scan_button(ui, ctx, state, path, cache.clone());
+                }
+            });
 
             match state {
                 ScanState::Idle => {}
