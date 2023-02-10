@@ -1,6 +1,10 @@
 use std::collections::HashMap;
-use std::sync::{mpsc::Receiver, Arc, Mutex};
+use std::sync::{
+    mpsc::{self, Receiver},
+    Arc, Mutex,
+};
 use std::thread;
+use std::time::Duration;
 
 use bytesize::ByteSize;
 use walkdir::WalkDir;
@@ -16,17 +20,13 @@ enum ScanState {
 }
 
 enum Message {
-    Intermediate(FinalEntry),
+    Intermediate(Vec<FinalEntry>),
     Done,
 }
 
 impl ScanState {
     fn is_scanning(&self) -> bool {
-        if let ScanState::Scanning(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, ScanState::Scanning(_))
     }
 }
 
@@ -39,6 +39,7 @@ pub struct TemplateApp {
     #[serde(skip)]
     state: ScanState,
     // File size cache
+    // TODO: use this cache
     #[serde(skip)]
     cache: Arc<Mutex<Cache>>,
 }
@@ -46,7 +47,7 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            path: "C:\\Projects\\rust".to_owned(),
+            path: "C:\\Projects\\rust".into(),
             state: ScanState::Idle,
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -108,11 +109,14 @@ impl eframe::App for TemplateApp {
                 }
 
                 ui.text_edit_singleline(path);
+                // TODO: Show as needed
                 if ui.button("Stop").clicked() {
                     *state = ScanState::Idle;
                 }
                 if !state.is_scanning() {
-                    add_scan_button(ui, ctx, state, path, cache.clone());
+                    if ui.button("Calculate").clicked() {
+                        scan_directory(ctx, state, path, cache.clone());
+                    }
                 }
             });
 
@@ -126,16 +130,18 @@ impl eframe::App for TemplateApp {
                                 *state = ScanState::Done(dirs);
                                 return;
                             }
-                            Message::Intermediate((p, s)) => {
-                                results.entry(p).and_modify(|size| *size += s).or_insert(s);
+                            Message::Intermediate(vec) => {
+                                for (p, s) in vec {
+                                    results.entry(p).and_modify(|size| *size += s).or_insert(s);
+                                }
                             }
                         }
                     }
 
                     ui.label("Scanning in progress...");
 
-                    // We're sorting and calculating sum every time
-                    // Probably needs optimisation
+                    // We're sorting and calculating sum every time on each repaint
+                    // TODO: needs optimisation
                     let dirs = sort_results(results.iter());
                     display_dirs(ui, &dirs);
                 }
@@ -186,77 +192,89 @@ fn display_dirs(ui: &mut egui::Ui, vec: &Vec<FinalEntry>) {
             ui.end_row();
         });
 }
-
-fn add_scan_button(
-    ui: &mut egui::Ui,
+fn scan_directory(
     ctx: &egui::Context,
     state: &mut ScanState,
     path: &str,
     cache: Arc<Mutex<Cache>>,
 ) {
-    if ui.button("Calculate").clicked() {
-        let sub_paths = if let Ok(p) = std::fs::read_dir(path) {
-            p
-        } else {
-            *state = ScanState::Error(format!("On open root dir: {path}"));
-            return;
-        };
+    let sub_paths = if let Ok(p) = std::fs::read_dir(path) {
+        p
+    } else {
+        *state = ScanState::Error(format!("On open root dir: {path}"));
+        return;
+    };
 
-        use std::sync::mpsc::channel;
-        let (tx, rx) = channel();
-        *state = ScanState::Scanning((rx, HashMap::new()));
+    /* We're sending intermediate results every 100 ms to not overwhelm UI with frequent updates here.
+       First thread is sending events to UI, second — to the first thread (and `Done` message).
+       Ideally, we want to give each directory iterator an adjustable amount of time to work (100 ms default),
+       not number of entries (1024 now) because time may be different for different types of filesystems.
+       TODO: simplify code to one thread and adjustable amount of time to work
+       TODO: Always have different iterators for each subdir of subdir (currently we have iters only for root dir)
+    */
+    let (tx_total, rx_total) = mpsc::channel();
+    let (tx_inter, rx_inter) = mpsc::channel();
+    *state = ScanState::Scanning((rx_total, HashMap::new()));
 
-        let ctx = ctx.clone();
-        thread::spawn(move || {
-            let mut cache = cache.lock().unwrap();
-            cache.insert("Test".to_string(), 2);
+    let ctx = ctx.clone();
+    let tx = tx_total.clone();
+    thread::spawn(move || loop {
+        // TODO: Stop thread on `rx_inter` or `tx_total` hung-up
+        let intermediate: Vec<_> = rx_inter.try_iter().collect();
+        if !intermediate.is_empty() {
+            tx.send(Message::Intermediate(intermediate)).unwrap();
+            ctx.request_repaint();
+        }
 
-            let mut sub_iters: Vec<_> = sub_paths
-                .filter_map(|p| p.ok()) // Ignore subdirectory if it fails on read
-                .map(|p| {
-                    (
-                        WalkDir::new(p.path())
-                            .into_iter()
-                            .filter_map(|e| e.ok()) // Ignore any entry on a way
-                            .filter(|e| e.file_type().is_file()),
-                        p.file_name().to_str().unwrap().to_owned(),
-                    )
-                })
-                .collect();
+        thread::sleep(Duration::from_millis(100));
+    });
 
-            let mut flags = vec![true; sub_iters.len()];
+    thread::spawn(move || {
+        let mut cache = cache.lock().unwrap();
+        cache.insert("Test".to_string(), 2);
 
-            while !flags.iter().all(|&f| f == false) {
-                for (i, (iter, name)) in sub_iters.iter_mut().enumerate() {
-                    if flags[i] == false {
-                        continue;
+        let mut sub_iters: Vec<_> = sub_paths
+            .filter_map(|p| p.ok()) // Ignore subdirectory if it fails on read
+            .map(|p| {
+                (
+                    WalkDir::new(p.path())
+                        .into_iter()
+                        .filter_map(|e| e.ok()) // Ignore any entry on the way
+                        .filter(|e| e.file_type().is_file()),
+                    p.file_name().to_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+
+        // Calculating the size of the 1024 items on each subdirectory sequentally
+        let mut flags = vec![true; sub_iters.len()];
+        while !flags.iter().all(|&f| !f) {
+            for (i, (iter, name)) in sub_iters.iter_mut().enumerate() {
+                // Ugly, needs refactoring
+                if !flags[i] {
+                    continue;
+                }
+
+                // Get next 1024 (or less) filesystem entries
+                let two: Vec<_> = iter.take(1024).collect();
+
+                if !two.is_empty() {
+                    let size = two.iter().map(|e| e.metadata().unwrap().len()).sum::<u64>();
+                    // Fighting the borrow checker here
+                    if tx_inter.send((name.to_owned(), size)).is_err() {
+                        println!("Nowhere to send");
+                        return;
                     }
-
-                    //let (len, size) = iter.take(2).map(|e| e.metadata().unwrap().len()).enumerate().fold((0, 0),
-                    //    |(len, acc), (i, s)| (len.max(i), acc+s));
-                    let two: Vec<_> = iter.take(1024).collect();
-
-                    if !two.is_empty() {
-                        let size = two.iter().map(|e| e.metadata().unwrap().len()).sum::<u64>();
-                        // Fighting the borrow checker here
-                        if tx
-                            .send(Message::Intermediate((name.to_owned(), size)))
-                            .is_err()
-                        {
-                            println!("Nowhere to send");
-                            return;
-                        }
-                        ctx.request_repaint();
-                    } else {
-                        flags[i] = false;
-                        println!("Iter {i} done: {:?}", iter);
-                    }
+                    //ctx.request_repaint();
+                } else {
+                    flags[i] = false;
+                    println!("Iter {i} done: {:?}", iter);
                 }
             }
+        }
 
-            // Don't care for this message to be received
-            let _ = tx.send(Message::Done);
-            ctx.request_repaint();
-        });
-    }
+        // Don't care for this message to be received
+        let _ = tx_total.send(Message::Done);
+        //ctx.request_repaint();
+    });
 }
