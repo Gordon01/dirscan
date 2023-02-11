@@ -1,33 +1,22 @@
 use std::collections::HashMap;
-use std::sync::{
-    mpsc::{self, Receiver},
-    Arc, Mutex,
-};
-use std::thread;
-use std::time::Duration;
+use std::sync::{mpsc::Receiver, Arc, Mutex};
 
+use super::scan;
 use bytesize::ByteSize;
-use walkdir::WalkDir;
 
 type FinalEntry = (String, u64);
-type Cache = HashMap<String, u64>;
+pub type Cache = HashMap<String, u64>;
 
-enum ScanState {
+pub enum ScanState {
     Idle,
     Scanning((Receiver<Message>, Cache)),
     Done(Vec<FinalEntry>),
     Error(String),
 }
 
-enum Message {
+pub enum Message {
     Intermediate(Vec<FinalEntry>),
     Done,
-}
-
-impl ScanState {
-    fn is_scanning(&self) -> bool {
-        matches!(self, ScanState::Scanning(_))
-    }
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -57,11 +46,7 @@ impl Default for TemplateApp {
 impl TemplateApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
-
         // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
             return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
         }
@@ -77,18 +62,11 @@ impl eframe::App for TemplateApp {
     }
 
     /// Called each time the UI needs repainting, which may be many times per second.
-    /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let Self { path, state, cache } = self;
 
-        // Examples of how to create different panels and windows.
-        // Pick whichever suits you.
-        // Tip: a good default choice is to just keep the `CentralPanel`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
-
         #[cfg(not(target_arch = "wasm32"))] // no File->Quit on web pages!
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Quit").clicked() {
@@ -109,13 +87,13 @@ impl eframe::App for TemplateApp {
                 }
 
                 ui.text_edit_singleline(path);
-                // TODO: Show as needed
-                if ui.button("Stop").clicked() {
-                    *state = ScanState::Idle;
-                }
-                if !state.is_scanning() {
+                if matches!(state, ScanState::Scanning(_)) {
+                    if ui.button("Stop").clicked() {
+                        *state = ScanState::Idle;
+                    }
+                } else {
                     if ui.button("Calculate").clicked() {
-                        scan_directory(ctx, state, path, cache.clone());
+                        scan::scan_directory(ctx, state, path, cache.clone());
                     }
                 }
             });
@@ -191,90 +169,4 @@ fn display_dirs(ui: &mut egui::Ui, vec: &Vec<FinalEntry>) {
             ui.label(format!("Total: {total}"));
             ui.end_row();
         });
-}
-fn scan_directory(
-    ctx: &egui::Context,
-    state: &mut ScanState,
-    path: &str,
-    cache: Arc<Mutex<Cache>>,
-) {
-    let sub_paths = if let Ok(p) = std::fs::read_dir(path) {
-        p
-    } else {
-        *state = ScanState::Error(format!("On open root dir: {path}"));
-        return;
-    };
-
-    /* We're sending intermediate results every 100 ms to not overwhelm UI with frequent updates here.
-       First thread is sending events to UI, second — to the first thread (and `Done` message).
-       Ideally, we want to give each directory iterator an adjustable amount of time to work (100 ms default),
-       not number of entries (1024 now) because time may be different for different types of filesystems.
-       TODO: simplify code to one thread and adjustable amount of time to work
-       TODO: Always have different iterators for each subdir of subdir (currently we have iters only for root dir)
-    */
-    let (tx_total, rx_total) = mpsc::channel();
-    let (tx_inter, rx_inter) = mpsc::channel();
-    *state = ScanState::Scanning((rx_total, HashMap::new()));
-
-    let ctx = ctx.clone();
-    let tx = tx_total.clone();
-    thread::spawn(move || loop {
-        // TODO: Stop thread on `rx_inter` or `tx_total` hung-up
-        let intermediate: Vec<_> = rx_inter.try_iter().collect();
-        if !intermediate.is_empty() {
-            tx.send(Message::Intermediate(intermediate)).unwrap();
-            ctx.request_repaint();
-        }
-
-        thread::sleep(Duration::from_millis(100));
-    });
-
-    thread::spawn(move || {
-        let mut cache = cache.lock().unwrap();
-        cache.insert("Test".to_string(), 2);
-
-        let mut sub_iters: Vec<_> = sub_paths
-            .filter_map(|p| p.ok()) // Ignore subdirectory if it fails on read
-            .map(|p| {
-                (
-                    WalkDir::new(p.path())
-                        .into_iter()
-                        .filter_map(|e| e.ok()) // Ignore any entry on the way
-                        .filter(|e| e.file_type().is_file()),
-                    p.file_name().to_str().unwrap().to_owned(),
-                )
-            })
-            .collect();
-
-        // Calculating the size of the 1024 items on each subdirectory sequentally
-        let mut flags = vec![true; sub_iters.len()];
-        while !flags.iter().all(|&f| !f) {
-            for (i, (iter, name)) in sub_iters.iter_mut().enumerate() {
-                // Ugly, needs refactoring
-                if !flags[i] {
-                    continue;
-                }
-
-                // Get next 1024 (or less) filesystem entries
-                let two: Vec<_> = iter.take(1024).collect();
-
-                if !two.is_empty() {
-                    let size = two.iter().map(|e| e.metadata().unwrap().len()).sum::<u64>();
-                    // Fighting the borrow checker here
-                    if tx_inter.send((name.to_owned(), size)).is_err() {
-                        println!("Nowhere to send");
-                        return;
-                    }
-                    //ctx.request_repaint();
-                } else {
-                    flags[i] = false;
-                    println!("Iter {i} done: {:?}", iter);
-                }
-            }
-        }
-
-        // Don't care for this message to be received
-        let _ = tx_total.send(Message::Done);
-        //ctx.request_repaint();
-    });
 }
