@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::{PathBuf, Component};
+use std::str::FromStr;
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 
 use super::scan;
@@ -109,8 +111,18 @@ impl eframe::App for TemplateApp {
                                 return;
                             }
                             Message::Intermediate(vec) => {
+                                let root_depth = PathBuf::from_str(path).unwrap().components().count();
+
                                 for (p, s) in vec {
-                                    results.entry(p).and_modify(|size| *size += s).or_insert(s);
+                                    // This is a size of root dir itself, it should be added too
+                                    if &p == path {
+                                        continue;
+                                    }
+
+                                    // Filter 2+ level subdirectories
+                                    if let Component::Normal(subdir) = PathBuf::from(p).components().nth(root_depth).unwrap(){
+                                        results.entry(subdir.to_str().unwrap().to_owned()).and_modify(|size| *size += s).or_insert(s);
+                                    }
                                 }
                             }
                         }

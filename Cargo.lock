@@ -530,6 +530,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirwiz"
+version = "0.1.0"
+
+[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -606,12 +610,12 @@ dependencies = [
  "bytesize",
  "console_error_panic_hook",
  "dirs-next",
+ "dirwiz",
  "eframe",
  "egui",
  "serde",
  "tracing-subscriber",
  "tracing-wasm",
- "walkdir",
  "wasm-bindgen-futures",
 ]
 

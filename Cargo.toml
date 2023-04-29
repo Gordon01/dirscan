@@ -17,9 +17,9 @@ eframe = { version = "0.20.0", default-features = false, features = [
 
 # You only need serde if you want app persistence:
 serde = { version = "1", features = ["derive"] }
-walkdir = "2.3.2"
 bytesize = "1.1.0"
 dirs-next = "2.0.0"
+dirwiz = { path = "C:\\projects\\rust\\dirwiz"}
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
