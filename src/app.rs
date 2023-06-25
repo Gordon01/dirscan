@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{PathBuf, Component};
+use std::path::{Component, PathBuf};
 use std::str::FromStr;
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 
@@ -13,7 +13,6 @@ pub enum ScanState {
     Idle,
     Scanning((Receiver<Message>, Cache)),
     Done(Vec<FinalEntry>),
-    Error(String),
 }
 
 pub enum Message {
@@ -93,10 +92,8 @@ impl eframe::App for TemplateApp {
                     if ui.button("Stop").clicked() {
                         *state = ScanState::Idle;
                     }
-                } else {
-                    if ui.button("Calculate").clicked() {
-                        scan::scan_directory(ctx, state, path, cache.clone());
-                    }
+                } else if ui.button("Calculate").clicked() {
+                    scan::scan_directory(ctx, state, path, cache.clone());
                 }
             });
 
@@ -111,7 +108,8 @@ impl eframe::App for TemplateApp {
                                 return;
                             }
                             Message::Intermediate(vec) => {
-                                let root_depth = PathBuf::from_str(path).unwrap().components().count();
+                                let root_depth =
+                                    PathBuf::from_str(path).unwrap().components().count();
 
                                 for (p, s) in vec {
                                     // This is a size of root dir itself, it should be added too
@@ -120,8 +118,13 @@ impl eframe::App for TemplateApp {
                                     }
 
                                     // Filter 2+ level subdirectories
-                                    if let Component::Normal(subdir) = PathBuf::from(p).components().nth(root_depth).unwrap(){
-                                        results.entry(subdir.to_str().unwrap().to_owned()).and_modify(|size| *size += s).or_insert(s);
+                                    if let Component::Normal(subdir) =
+                                        PathBuf::from(p).components().nth(root_depth).unwrap()
+                                    {
+                                        results
+                                            .entry(subdir.to_str().unwrap().to_owned())
+                                            .and_modify(|size| *size += s)
+                                            .or_insert(s);
                                     }
                                 }
                             }
@@ -138,9 +141,6 @@ impl eframe::App for TemplateApp {
                 ScanState::Done(dirs) => {
                     ui.label("Done");
                     display_dirs(ui, dirs);
-                }
-                ScanState::Error(e) => {
-                    ui.label(format!("Error: {e}"));
                 }
             }
         });

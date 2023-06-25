@@ -20,14 +20,15 @@ pub fn scan_directory(
     cache.insert("Test".to_string(), 2);
 
     let ctx = ctx.clone();
-    let mut dirwiz = DirWiz::new(path).into_iter();
+    let dirwiz = DirWiz::new(path).into_iter();
     thread::spawn(move || {
         let mut start = Instant::now();
         let mut intermediate = Vec::new();
-        while let Some((p, s)) = dirwiz.next() {
-            intermediate.push((p.to_str().clone().unwrap().to_owned(), s));
+        for (p, s) in dirwiz {
+            intermediate.push((p.to_str().unwrap().to_owned(), s));
             if start.elapsed() > Duration::from_millis(100) {
-                tx_total.send(Message::Intermediate(intermediate.clone()))
+                tx_total
+                    .send(Message::Intermediate(intermediate.clone()))
                     .unwrap();
                 ctx.request_repaint();
                 intermediate.clear();
