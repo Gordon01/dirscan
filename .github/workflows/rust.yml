@@ -73,3 +73,15 @@ jobs:
         with:
           command: clippy
           args: --quiet -- -D warnings
+
+  cargo_bloat:
+    name: Cargo Bloat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run cargo bloat
+        uses: cs50victor/cargo-bloat-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          bloat_args: --quiet
+          tree_args: --quiet
