@@ -22,7 +22,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --all-features
+          args: --quite --all-features
 
   check_wasm:
     name: Check wasm32
@@ -38,7 +38,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --all-features --lib --target wasm32-unknown-unknown
+          args: --quite --all-features --lib --target wasm32-unknown-unknown
 
   test:
     name: Test Suite
@@ -54,7 +54,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --lib
+          args: --quite --lib
 
   fmt:
     name: Rustfmt
@@ -70,7 +70,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
-          args: --all -- --check
+          args: --quite --all -- --check
 
   clippy:
     name: Clippy
@@ -86,7 +86,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: -- -D warnings
+          args: --quite -- -D warnings
 
   trunk:
     name: trunk
