@@ -532,6 +532,7 @@ dependencies = [
 [[package]]
 name = "dirwiz"
 version = "0.1.0"
+source = "git+https://github.com/Gordon01/dirwiz#b2ef774318f1f17737185fbd852ee3d6e1919756"
 
 [[package]]
 name = "dispatch"

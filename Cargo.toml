@@ -19,7 +19,7 @@ eframe = { version = "0.20.0", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 bytesize = "1.1.0"
 dirs-next = "2.0.0"
-dirwiz = { path = "C:\\projects\\rust\\dirwiz"}
+dirwiz = { git = "https://github.com/Gordon01/dirwiz"}
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
