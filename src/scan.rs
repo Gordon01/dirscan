@@ -27,7 +27,8 @@ pub fn scan_directory(
         for (p, s) in dirwiz {
             intermediate.push((p.to_str().unwrap().to_owned(), s));
             if start.elapsed() > Duration::from_millis(100) {
-                tx_total.send(Message::Intermediate(intermediate.clone()))
+                tx_total
+                    .send(Message::Intermediate(intermediate.clone()))
                     .unwrap();
                 ctx.request_repaint();
                 intermediate.clear();
