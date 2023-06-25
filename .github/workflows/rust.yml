@@ -83,5 +83,3 @@ jobs:
         uses: cs50victor/cargo-bloat-action@master
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          bloat_args: --quiet
-          tree_args: --quiet
