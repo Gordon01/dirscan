@@ -22,7 +22,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --quite --all-features
+          args: --quiet --all-features
 
   check_wasm:
     name: Check wasm32
@@ -38,11 +38,12 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --quite --all-features --lib --target wasm32-unknown-unknown
+          args: --quiet --all-features --lib --target wasm32-unknown-unknown
 
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    needs: check
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -54,7 +55,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --quite --lib
+          args: --quiet --lib
 
   fmt:
     name: Rustfmt
@@ -70,11 +71,12 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
-          args: --quite --all -- --check
+          args: --quiet --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    needs: check
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -86,7 +88,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --quite -- -D warnings
+          args: --quiet -- -D warnings
 
   trunk:
     name: trunk
